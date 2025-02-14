@@ -14,15 +14,10 @@ if [ ! -e ./configs/config.yml ] ; then
   echo    'access_token: DISCORD_ACCESS_TOKEN
 application_id: DISCORD_CLIENT_ID
 
-rvc_disabled: True
-rvc_host: "localhost"
-rvc_port: 7865
-rvc_default_model: "CHANGE_HERE"
-
 voicevox_host: "localhost"
 voicevox_port: 50021
 
-max_text_length: 10
+max_text_length: 40
 ' >> ./configs/config.yml
 fi
 
