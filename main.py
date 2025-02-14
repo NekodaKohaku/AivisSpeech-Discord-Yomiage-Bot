@@ -105,8 +105,7 @@ async def generate_wav(text: str, speaker: int = 888753760, file_dir: str = TEMP
     複数のTTSサーバーを使用して、最も早く応答した音声ファイルのパスを返す
     """
     servers = [
-        {"host": "localhost", "port": 10101},
-        {"host": "192.168.0.246", "port": 10101}
+        {"host": "localhost", "port": 10101}
     ]
     tasks = []
     for server in servers:
