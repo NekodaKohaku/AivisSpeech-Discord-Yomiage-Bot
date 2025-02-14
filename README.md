@@ -1,5 +1,5 @@
 # AivisSpeech-Discord-Yomiage-Bot
-ivisSpeech エンジン を使用した Discord 読み上げボット。
+AivisSpeech エンジン を使用した Discord 読み上げボット。
 
 AivisSpeech エンジン は VOICEVOX エンジン をベースにした日本語音声合成エンジンです。感情豊かな音声を簡単に生成できます。また、Style-Bert-VITS2 を使用することで、お気に入りの声を学習させ、読み上げ用の音声として作成することもできます。
 
