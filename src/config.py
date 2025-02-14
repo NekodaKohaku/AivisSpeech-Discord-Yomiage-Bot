@@ -7,11 +7,6 @@ class Config:
     discord_access_token = ""
     discord_application_id = ""
 
-    rvc_disabled = False
-    rvc_host = "localhost"
-    rvc_port = 7865
-    rvc_default_model = "CHANGE_HERE.pth"
-
     voicevox_host = "localhost"
     voicevox_port = 50021
 
