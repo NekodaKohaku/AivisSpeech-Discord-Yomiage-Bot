@@ -5,7 +5,6 @@ AivisSpeech Engine は、VOICEVOX ENGINE をベースにした日本語音声合
 それは日本語音声合成ソフトウェア AivisSpeech に組み込まれており、簡単に感情豊かな音声を生成することができます。
 また、Style-Bert-VITS2 を使用して、お気に入りの声を AivisSpeech Engine で使用できるように作成することも可能です。
 
-さらに、VoiceVox Engine と同時に使用することもできます。
 
 # 動画
 
