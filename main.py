@@ -22,30 +22,7 @@ os.makedirs(TEMP_WAV_DIR, exist_ok=True)
 
 # 事前定義された音声リスト
 available_voice_ids = [
-    {"name": "Anneli", "id": 888753760},
-    {"name": "decoprokun", "id": 604172608},
-    {"name": "fumifumi", "id": 606865152},
-    {"name": "hinakoyuhara", "id": 2058221184},
-    {"name": "peach", "id": 933744512},
-    {"name": "white", "id": 706073888},
-    {"name": "yukyu", "id": 1099751712},
-    {"name": "にせ", "id": 1937616896},
-    {"name": "まい", "id": 1431611904},
-    {"name": "ろてじん（長老ボイス）", "id": 391794336},
-    {"name": "亜空マオ", "id": 532977856},
-    {"name": "凛音エル", "id": 1388823424},
-    {"name": "天深シノ", "id": 1063997408},
-    {"name": "宗周定昌", "id": 1143949696},
-    {"name": "様子ヶ丘シイナ", "id": 1130341985},
-    {"name": "立神ケイ", "id": 87094656},
-    {"name": "観測症", "id": 1275216064},
-    {"name": "Furina", "id": 134921440},
-    {"name": "Lunlun", "id": 788751232},
-    {"name": "Mita", "id": 1292986496},
-    {"name": "花火", "id": 591215776},
-    {"name": "Nahida", "id": 1206699648},
-    {"name": "KikotoMahiro", "id": 1430982625},
-    {"name": "Paimon", "id": 1031189312}
+    {"name": "Anneli", "id": 888753760}
 ]
 
 # ユーザー音声マッピングファイル
@@ -128,8 +105,7 @@ async def generate_wav(text: str, speaker: int = 888753760, file_dir: str = TEMP
     複数のTTSサーバーを使用して、最も早く応答した音声ファイルのパスを返す
     """
     servers = [
-        {"host": "localhost", "port": 10101},
-        {"host": "192.168.0.246", "port": 10101}
+        {"host": "localhost", "port": 10101}
     ]
     tasks = []
     for server in servers:
