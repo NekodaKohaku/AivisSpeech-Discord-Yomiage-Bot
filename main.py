@@ -22,7 +22,30 @@ os.makedirs(TEMP_WAV_DIR, exist_ok=True)
 
 # 事前定義された音声リスト
 available_voice_ids = [
-    {"name": "Anneli", "id": 888753760}
+    {"name": "Anneli", "id": 888753760},
+    {"name": "decoprokun", "id": 604172608},
+    {"name": "fumifumi", "id": 606865152},
+    {"name": "hinakoyuhara", "id": 2058221184},
+    {"name": "peach", "id": 933744512},
+    {"name": "white", "id": 706073888},
+    {"name": "yukyu", "id": 1099751712},
+    {"name": "にせ", "id": 1937616896},
+    {"name": "まい", "id": 1431611904},
+    {"name": "ろてじん（長老ボイス）", "id": 391794336},
+    {"name": "亜空マオ", "id": 532977856},
+    {"name": "凛音エル", "id": 1388823424},
+    {"name": "天深シノ", "id": 1063997408},
+    {"name": "宗周定昌", "id": 1143949696},
+    {"name": "様子ヶ丘シイナ", "id": 1130341985},
+    {"name": "立神ケイ", "id": 87094656},
+    {"name": "観測症", "id": 1275216064},
+    {"name": "Furina", "id": 134921440},
+    {"name": "Lunlun", "id": 788751232},
+    {"name": "Mita", "id": 1292986496},
+    {"name": "花火", "id": 591215776},
+    {"name": "Nahida", "id": 1206699648},
+    {"name": "KikotoMahiro", "id": 1430982625},
+    {"name": "Paimon", "id": 1031189312}
 ]
 
 # ユーザー音声マッピングファイル
@@ -105,7 +128,8 @@ async def generate_wav(text: str, speaker: int = 888753760, file_dir: str = TEMP
     複数のTTSサーバーを使用して、最も早く応答した音声ファイルのパスを返す
     """
     servers = [
-        {"host": "localhost", "port": 10101}
+        {"host": "localhost", "port": 10101},
+        {"host": "192.168.0.246", "port": 10101}
     ]
     tasks = []
     for server in servers:
@@ -258,7 +282,7 @@ async def on_message(message: discord.Message):
     custom_emoji_pattern = re.compile(r'<a?:(\w+):(\d+)>')
     content = re.sub(custom_emoji_pattern, '', original_content)
 
-    # "neko!" で始まるメッセージは無視する
+    # "neko!" で始まるメッセージは無視する (Music Bot コマンド)
     if content.lower().startswith("neko!"):
         return
 
@@ -268,23 +292,27 @@ async def on_message(message: discord.Message):
     for role in message.role_mentions:
         content = content.replace(f"<@&{role.id}>", f"アットマーク {role.name}")
 
-    # URLの正規表現パターン
-    url_pattern = re.compile(r'https?://[^\s]+')
-
-    # メッセージが完全にURLのみで構成されているか確認する
-    if re.fullmatch(url_pattern, original_content):
-        # 完全にURLのみの場合、あらかじめ保存された url.wav を使用する
-        wav_path = os.path.abspath(os.path.join(SAVED_WAV_DIR, 'url.wav'))
+    # 添付ファイルが存在する場合は、添付ファイル用の音声ファイルを使用する
+    if message.attachments:
+        wav_path = os.path.abspath(os.path.join(SAVED_WAV_DIR, 'attachment.wav'))
     else:
-        # テキスト中のURLを"URL"という固定文字列に置換する
-        content = url_pattern.sub("URL", content)
-        # テキストが最大文字数を超える場合は切り捨てる
-        if len(content) > config_obj.max_text_length:
-            content = content[:config_obj.max_text_length] + "以下省略"
-        # テキストが空でなく、かつ無視すべき内容でなければTTS生成を行う
-        if content.strip() and not checker.ignore_check(content):
-            wav_path = await generate_wav(content, speaker_id)
-    
+        # URLの正規表現パターン
+        url_pattern = re.compile(r'https?://[^\s]+')
+
+        # メッセージが完全にURLのみで構成されているか確認する
+        if re.fullmatch(url_pattern, original_content):
+            # 完全にURLのみの場合、あらかじめ保存された url.wav を使用する
+            wav_path = os.path.abspath(os.path.join(SAVED_WAV_DIR, 'url.wav'))
+        else:
+            # テキスト中のURLを"URL"という固定文字列に置換する
+            content = url_pattern.sub("URL", content)
+            # テキストが最大文字数を超える場合は切り捨てる
+            if len(content) > config_obj.max_text_length:
+                content = content[:config_obj.max_text_length] + "以下省略"
+            # テキストが空でなく、かつ無視すべき内容でなければTTS生成を行う
+            if content.strip() and not checker.ignore_check(content):
+                wav_path = await generate_wav(content, speaker_id)
+
     # 音声ファイルが生成または指定され、かつ存在する場合は再生キューに追加する
     if wav_path and os.path.exists(wav_path):
         tts_manager.enqueue(vc, message.guild, discord.FFmpegPCMAudio(wav_path))
@@ -341,5 +369,9 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         non_bot_members = [m for m in vc.channel.members if not m.bot]
         if not non_bot_members:
             await vc.disconnect()
+
+
+
+
 
 client.run(discord_access_token)
