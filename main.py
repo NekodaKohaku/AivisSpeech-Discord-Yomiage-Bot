@@ -311,6 +311,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             vc = guild.voice_client
             bot_join_path = os.path.abspath(os.path.join(SAVED_WAV_DIR, 'bot_join.wav'))
             tts_manager.enqueue(vc, guild, discord.FFmpegPCMAudio(bot_join_path))
+            return
             
         # Bot自身ではないユーザーの場合、入室通知音声を生成して再生する
         if not member.bot:
