@@ -22,7 +22,7 @@ AivisSpeech エンジン は VOICEVOX エンジン をベースにした日本�
 
 
 # 動画
-
+https://x.com/NekodaKohaku/status/1896894209497677969
 
 # セットアップ
 下記のページをご覧ください。  
