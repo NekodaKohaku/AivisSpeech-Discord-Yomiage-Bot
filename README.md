@@ -26,7 +26,7 @@ https://x.com/NekodaKohaku/status/1896894209497677969
 
 # セットアップ
 下記のページをご覧ください。  
-[セットアップ手順](./docs/setup.md)
+[セットアップ手順](https://note.com/nekodakohaku/n/n13906704167c)
 
 # 貢献(Contributing)
 zozonteq さんのコードをベースにしています。
