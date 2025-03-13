@@ -8,6 +8,7 @@ import aiohttp
 import os
 import uuid
 import shutil
+import emoji
 from src import checker
 from src import config as cfg_module
 from src import guild_tts_manager as tts_manager_module
@@ -22,7 +23,31 @@ os.makedirs(TEMP_WAV_DIR, exist_ok=True)
 
 # 事前定義された音声リスト
 available_voice_ids = [
-    {"name": "Anneli", "id": 888753760}
+    {"name": "Anneli", "id": 888753760},
+    {"name": "decoprokun", "id": 604172608},
+    {"name": "fumifumi", "id": 606865152},
+    {"name": "hinakoyuhara", "id": 2058221184},
+    {"name": "peach", "id": 933744512},
+    {"name": "white", "id": 706073888},
+    {"name": "yukyu", "id": 1099751712},
+    {"name": "にせ", "id": 1937616896},
+    {"name": "まい", "id": 1431611904},
+    {"name": "ろてじん（長老ボイス）", "id": 391794336},
+    {"name": "亜空マオ", "id": 532977856},
+    {"name": "凛音エル", "id": 1388823424},
+    {"name": "天深シノ", "id": 1063997408},
+    {"name": "宗周定昌", "id": 1143949696},
+    {"name": "様子ヶ丘シイナ", "id": 1130341985},
+    {"name": "立神ケイ", "id": 87094656},
+    {"name": "観測症", "id": 1275216064},
+    {"name": "Furina", "id": 134921440},
+    {"name": "Lunlun", "id": 788751232},
+    {"name": "Mita", "id": 1292986496},
+    {"name": "花火", "id": 591215776},
+    {"name": "Nahida", "id": 1206699648},
+    {"name": "KikotoMahiro", "id": 1430982625},
+    {"name": "Paimon", "id": 1031189312},
+    {"name": "ユニ", "id": 1105189120}
 ]
 
 # ユーザー音声マッピングファイル
@@ -105,7 +130,8 @@ async def generate_wav(text: str, speaker: int = 888753760, file_dir: str = TEMP
     複数のTTSサーバーを使用して、最も早く応答した音声ファイルのパスを返す
     """
     servers = [
-        {"host": "localhost", "port": 10101}
+        {"host": "localhost", "port": 10101},
+        {"host": "192.168.0.246", "port": 10101}
     ]
     tasks = []
     for server in servers:
@@ -257,6 +283,7 @@ async def on_message(message: discord.Message):
     # カスタム絵文字を削除する
     custom_emoji_pattern = re.compile(r'<a?:(\w+):(\d+)>')
     content = re.sub(custom_emoji_pattern, '', original_content)
+    content = emoji.replace_emoji(content, replace="")
 
     # "neko!" で始まるメッセージは無視する (Music Bot コマンド)
     if content.lower().startswith("neko!"):
@@ -297,6 +324,28 @@ async def on_message(message: discord.Message):
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     guild = member.guild
     vc = guild.voice_client
+
+    # チャンネル移動の処理: ユーザーが1つのボイスチャンネルから別のボイスチャンネルに移動する場合
+    if before.channel is not None and after.channel is not None and before.channel != after.channel:
+        if vc is not None:
+            # ユーザーが他のチャンネルから、ボットがいるチャンネルに移動した場合、入室通知を再生する
+            if after.channel == vc.channel:
+                if not member.bot:
+                    wav_path = await generate_notification_wav("join", member, speaker=888753760)
+                    if wav_path:
+                        tts_manager.enqueue(vc, guild, discord.FFmpegPCMAudio(wav_path))
+            # ユーザーがボットがいるチャンネルから、他のチャンネルに移動した場合、退室通知を再生する
+            elif before.channel == vc.channel:
+                if not member.bot:
+                    wav_path = await generate_notification_wav("leave", member, speaker=888753760)
+                    if wav_path:
+                        tts_manager.enqueue(vc, guild, discord.FFmpegPCMAudio(wav_path))
+        else:
+            # ボットが未接続の場合、ユーザーが移動した先のチャンネルにボットを接続し
+            await after.channel.connect()
+            vc = guild.voice_client
+            bot_join_path = os.path.abspath(os.path.join(SAVED_WAV_DIR, 'bot_join.wav'))
+            tts_manager.enqueue(vc, guild, discord.FFmpegPCMAudio(bot_join_path))
 
     # ユーザーがボイスチャンネルに参加した場合（before.channel が None で after.channel が存在する場合）
     if before.channel is None and after.channel is not None:
