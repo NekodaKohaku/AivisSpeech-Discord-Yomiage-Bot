@@ -71,9 +71,25 @@ def get_voice_for_user(user_id: int, display_name: str) -> int:
 # -------------------------------
 # TTS生成関数
 # -------------------------------
+def convert_to_discord_format(input_path: str) -> str:
+    """
+    出力されたWAV音声をDiscordに最適な形式（48kHz、モノラル、16bit）に変換する
+    変換後のファイルパスを返す（元のファイル名をそのまま使用し上書き保存）
+    """
+    cmd = [
+        'ffmpeg', '-y',
+        '-i', input_path,
+        '-ar', '48000',
+        '-ac', '1',
+        '-sample_fmt', 's16',
+        input_path  # 直接覆蓋原檔
+    ]
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return input_path
+    
 async def generate_wav_from_server(text: str, speaker: int, filepath: str, host: str, port: int) -> str:
     """
-    指定したTTSサーバーに音声生成をリクエストし、ファイルに保存する
+    指定したTTSサーバーに音声生成をリクエストし、Discord最適フォーマットに変換したファイルパスを返す
     """
     try:
         params = {
@@ -94,9 +110,16 @@ async def generate_wav_from_server(text: str, speaker: int, filepath: str, host:
                 json=query_data
             ) as resp_synth:
                 audio_data = await resp_synth.read()
+
+        # Voicevoxから取得した生音声をファイルに保存
         with open(filepath, "wb") as f:
             f.write(audio_data)
-        return filepath
+
+        # Discordに適した形式（48kHz モノラル）に変換
+        converted_path = convert_to_discord_format(filepath)
+
+        return converted_path
+
     except Exception as e:
         print(f"Error generating wav from {host}:{port} - {e}")
         return None
