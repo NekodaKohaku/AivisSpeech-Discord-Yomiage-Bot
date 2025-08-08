@@ -267,6 +267,8 @@ async def on_message(message: discord.Message):
     if vc is None:
         return
 
+    wav_path = None
+
     # Botが接続しているボイスチャンネルに対応するテキストチャンネルのみ処理する
     if message.channel.id != vc.channel.id:
         return
@@ -315,8 +317,13 @@ async def on_message(message: discord.Message):
                 wav_path = await generate_wav(content, speaker_id)
 
     # 音声ファイルが生成または指定され、かつ存在する場合は再生キューに追加する
-    if wav_path and os.path.exists(wav_path):
-        tts_manager.enqueue(vc, message.guild, discord.FFmpegPCMAudio(wav_path))
+    if wav_path is not None and os.path.exists(wav_path):
+        delete_after_play = not wav_path.startswith(os.path.abspath(SAVED_WAV_DIR))
+        tts_manager.enqueue(vc, message.guild, {
+            "audio": discord.FFmpegPCMAudio(wav_path),
+            "file_path": wav_path,
+            "delete_after_play": delete_after_play
+        })
 
 @client.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
