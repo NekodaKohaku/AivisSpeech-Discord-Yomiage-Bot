@@ -13,9 +13,18 @@ import subprocess
 import wave
 import contextlib
 import tempfile
-from src import checker
+from typing import Optional, Dict
 from src import config as cfg_module
 from src import guild_tts_manager as tts_manager_module
+
+# -------------------------------
+# 可能なら uvloop を採用（Linux/Unix 環境で高速化）
+# -------------------------------
+try:
+    import uvloop  # type: ignore
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+except Exception:
+    pass
 
 # -------------------------------
 # 基本ディレクトリとグローバル設定
@@ -25,14 +34,35 @@ TEMP_WAV_DIR = os.path.join('temp', 'wav')
 os.makedirs(SAVED_WAV_DIR, exist_ok=True)
 os.makedirs(TEMP_WAV_DIR, exist_ok=True)
 
-# 事前定義された音声（キャラクター）ID一覧
+# よく使う正規表現は事前にコンパイル（毎回の compile コスト削減）
+CUSTOM_EMOJI_RE = re.compile(r'<a?:(\w+):(\d+)>')
+URL_RE = re.compile(r'https?://[^\s]+')
+
+# 事前定義された音声（キャラクター）ID一覧（必要最小限）
 available_voice_ids = [
     {"name": "Anneli", "id": 888753760}
 ]
 
 # ユーザー別の音声マッピング（永続化ファイル）
 USER_VOICE_MAPPING_FILE = "voice_mapping.yaml"
-user_voice_mapping = {}
+user_voice_mapping: Dict[int, dict] = {}
+
+# 共有 HTTP セッション（TTS 用）
+_http_session: Optional[aiohttp.ClientSession] = None
+
+async def get_http_session() -> aiohttp.ClientSession:
+    """
+    共有の aiohttp.ClientSession を取得。
+    未生成または閉じている場合は再生成して返す。
+    """
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        _http_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=8),
+            connector=aiohttp.TCPConnector(limit=50, ssl=False, keepalive_timeout=30),
+            trust_env=False,
+        )
+    return _http_session
 
 def save_voice_mapping():
     """ユーザー音声マッピングを YAML に保存"""
@@ -98,14 +128,13 @@ def convert_to_discord_format(input_path: str) -> str:
     os.close(fd)
 
     cmd = [
-        'ffmpeg', '-y',
+        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
         '-i', input_path,
         '-ar', '48000',
         '-ac', '2',
         '-sample_fmt', 's16',
         tmp_out
     ]
-    print(f"[TTS][ffmpeg] {os.path.basename(input_path)} -> temp")
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0:
         print(proc.stderr.decode(errors='ignore'))
@@ -157,7 +186,7 @@ class WavPCMSource(discord.AudioSource):
     def __init__(self, wav_path: str):
         self.path = wav_path
         self._wav = wave.open(wav_path, 'rb')
-        # フォーマット厳密チェック
+        # フォーマット厳密チェック（生成時点で整えている前提の最終ガード）
         assert self._wav.getframerate() == 48000, "WAV must be 48kHz"
         assert self._wav.getsampwidth() == 2,     "WAV must be 16-bit (s16)"
         assert self._wav.getnchannels() == 2,     "WAV must be stereo (2ch)"
@@ -206,7 +235,6 @@ def build_audio_entry(wav_path: str, saved_dir: str = SAVED_WAV_DIR, volume: flo
             source = WavPCMSource(wav_path)
             source = discord.PCMVolumeTransformer(source, volume=volume)
             used = "PCM"
-            print(f"[TTS][use] PCM 直接再生: {wav_path}")
         except Exception as e:
             # 想定外の不整合・破損時は ffmpeg 再生に切り替え（変換はしない）
             print(f"[TTS][fallback] PCM 失敗、FFmpeg に切り替え: {e}")
@@ -227,84 +255,132 @@ def build_audio_entry(wav_path: str, saved_dir: str = SAVED_WAV_DIR, volume: flo
 # -------------------------------
 # TTS 生成処理
 # -------------------------------
-async def generate_wav_from_server(text: str, speaker: int, filepath: str, host: str, port: int) -> str:
+async def generate_wav_from_server(text: str, speaker: int, filepath: str, host: str, port: int) -> Optional[str]:
     """
-    指定の TTS サーバーへ音声生成を要求し、生成直後に Discord 想定形式へ整えたパスを返す
+    指定した TTS サーバーから音声ファイルを生成し、
+    可能であればエンジン側で Discord 互換形式に直接出力する。
+    （エンジンが非対応の場合は ensure_discord_wav により最終的に変換を保証）
     """
+    session = await get_http_session()
     try:
-        params = {
-            'text': text,
-            'speaker': speaker,
-            "enable_interrogative_upspeak": "true"
-        }
-        async with aiohttp.ClientSession() as session:
-            # ステップ1：音声クエリ生成
-            async with session.post(f'http://{host}:{port}/audio_query', params=params) as resp_query:
-                query_data = await resp_query.json()
-            headers = {'Content-Type': 'application/json'}
-            # ステップ2：音声合成
-            async with session.post(
-                f'http://{host}:{port}/synthesis',
-                headers=headers,
-                params=params,
-                json=query_data
-            ) as resp_synth:
-                audio_data = await resp_synth.read()
+        params = {'text': text, 'speaker': speaker, "enable_interrogative_upspeak": "true"}
 
-        # 生成された WAV を保存
+        # Step 1: audio_query を生成
+        async with session.post(f'http://{host}:{port}/audio_query', params=params) as resp_query:
+            resp_query.raise_for_status()
+            query_data = await resp_query.json()
+
+        # ★エンジン側に直接 Discord 形式での出力を要求（対応していれば有効）
+        query_data["outputSamplingRate"] = 48000
+        query_data["outputStereo"] = True
+
+        # Step 2: 音声合成
+        headers = {'Content-Type': 'application/json'}
+        async with session.post(
+            f'http://{host}:{port}/synthesis',
+            headers=headers,
+            params=params,
+            json=query_data
+        ) as resp_synth:
+            resp_synth.raise_for_status()
+            audio_data = await resp_synth.read()
+
+        # ファイルに書き込み
         with open(filepath, "wb") as f:
             f.write(audio_data)
 
-        # 生成直後に形式を保証
-        ensure_discord_wav(filepath, verbose=True)
+        # フォールバック：エンジンが完全に対応できない場合、ここで 48k/stereo/16bit に修正
+        ensure_discord_wav(filepath, verbose=False)
         return filepath
 
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+        except:
+            pass
         print(f"Error generating wav from {host}:{port} - {e}")
         return None
 
-async def generate_wav(text: str, speaker: int = 888753760, file_dir: str = TEMP_WAV_DIR) -> str:
+
+async def generate_wav(text: str, speaker: int = 888753760, file_dir: str = TEMP_WAV_DIR) -> Optional[str]:
     """
     複数の TTS サーバーを競わせ、最初に成功した音声ファイルのパスを返す
+    ・タイムアウト付き
+    ・不採用の一時ファイルはクリーンアップ
     """
     servers = [
-        {"host": "localhost", "port": 10101},
-        {"host": "192.168.0.246", "port": 10101}
+        {"host": "localhost", "port": 10101}
     ]
+
     tasks = []
+    task_to_path: Dict[asyncio.Task, str] = {}
+
     for server in servers:
         msg_uuid = str(uuid.uuid4())
         filepath = os.path.join(file_dir, f"{msg_uuid}.wav")
-        tasks.append(asyncio.create_task(
+        task = asyncio.create_task(
             generate_wav_from_server(text, speaker, filepath, server["host"], server["port"])
-        ))
-    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    valid_result = None
-    for task in done:
+        )
+        tasks.append(task)
+        task_to_path[task] = filepath
+
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED, timeout=6)
+
+    for d in done:
         try:
-            result = task.result()
+            result = d.result()
             if result and os.path.exists(result):
-                valid_result = result
-                break
-            else:
-                print(f"Invalid result from task: {result}")
-        except Exception as e:
-            print(f"Task error: {e}")
-    if valid_result:
-        for p in pending:
-            p.cancel()
-        return valid_result
-    # 最初のタスクが無効な場合、残りも順次確認
-    for task in pending:
-        try:
-            result = await task
-            if result and os.path.exists(result):
+                for p in pending:
+                    p.cancel()
+                for p in pending:
+                    try:
+                        await p
+                    except asyncio.CancelledError:
+                        path = task_to_path.get(p)
+                        if path and os.path.exists(path):
+                            try: os.remove(path)
+                            except: pass
+                    except:
+                        path = task_to_path.get(p)
+                        if path and os.path.exists(path):
+                            try: os.remove(path)
+                            except: pass
                 return result
-        except Exception as e:
-            print(f"Pending task error: {e}")
+        except Exception:
+            pass
+
+    for p in list(pending):
+        try:
+            result = await asyncio.wait_for(p, timeout=2)
+            if result and os.path.exists(result):
+                for q in pending:
+                    if q is not p:
+                        q.cancel()
+                        try:
+                            await q
+                        except asyncio.CancelledError:
+                            path = task_to_path.get(q)
+                            if path and os.path.exists(path):
+                                try: os.remove(path)
+                                except: pass
+                        except:
+                            path = task_to_path.get(q)
+                            if path and os.path.exists(path):
+                                try: os.remove(path)
+                                except: pass
+                return result
+        except Exception:
+            path = task_to_path.get(p)
+            if path and os.path.exists(path):
+                try: os.remove(path)
+                except: pass
+
     return None
 
-async def generate_notification_wav(action: str, user, speaker: int = 888753760) -> str:
+async def generate_notification_wav(action: str, user, speaker: int = 888753760) -> Optional[str]:
     """
     入室/退室の通知音声を生成し、キャッシュしたファイルパスを返す
       action: "join" または "leave"
@@ -314,7 +390,6 @@ async def generate_notification_wav(action: str, user, speaker: int = 888753760)
     display_name = user.display_name
     filename = f"{action}_{guild_id}_{user_id}.wav"
     filepath = os.path.join(SAVED_WAV_DIR, filename)
-    # 既にキャッシュがあればそれを使用
     if os.path.exists(filepath):
         return filepath
     text = f"{display_name} さんが{'入室' if action == 'join' else '退室'}しました。"
@@ -325,8 +400,24 @@ async def generate_notification_wav(action: str, user, speaker: int = 888753760)
     return None
 
 # -------------------------------
-# Discord Bot 設定
+# Discord Bot （Client を拡張して共用セッションを管理）
 # -------------------------------
+class Bot(discord.Client):
+    async def setup_hook(self) -> None:
+        """Bot 起動時：アプリコマンド同期 & 共有 HTTP セッション初期化"""
+        await tree.sync()
+        await get_http_session()  # ここで生成しておく（遅延でもOKだが先に作る）
+
+    async def close(self) -> None:
+        """終了時：共有 HTTP セッションを確実にクローズ"""
+        global _http_session
+        try:
+            if _http_session is not None and not _http_session.closed:
+                await _http_session.close()
+        finally:
+            _http_session = None
+            await super().close()
+
 config_obj = cfg_module.Config()
 tts_manager = tts_manager_module.guild_tts_manager()
 
@@ -334,15 +425,12 @@ discord_access_token = config_obj.discord_access_token
 discord_application_id = config_obj.discord_application_id
 
 intents = discord.Intents.all()
-client = discord.Client(intents=intents)
+client = Bot(intents=intents)
 tree = app_commands.CommandTree(client)
 
-@client.event
-async def on_ready():
-    print("Bot started!")
-    print(f"https://discord.com/api/oauth2/authorize?client_id={discord_application_id}&permissions=3148864&scope=bot%20applications.commands")
-    await tree.sync()
-
+# -------------------------------
+# スラッシュコマンド
+# -------------------------------
 @tree.command(name="vjoin", description="ボイスチャンネルにボットを参加させます。")
 async def join_command(interaction: discord.Interaction):
     if interaction.user.voice is None:
@@ -354,7 +442,6 @@ async def join_command(interaction: discord.Interaction):
         await interaction.user.voice.channel.connect()
         await interaction.response.send_message("ボイスチャンネルに接続しました。")
         wav_path = os.path.abspath(os.path.join(SAVED_WAV_DIR, 'bot_join.wav'))
-        print(f"[TTS] enqueue → {wav_path}")
         tts_manager.enqueue(interaction.guild.voice_client, interaction.guild, build_audio_entry(wav_path))
 
 @tree.command(name="vleave", description="ボイスチャンネルからボットを切断します。")
@@ -408,22 +495,18 @@ async def on_message(message: discord.Message):
     if vc is None:
         return
 
-    wav_path = None
-
     # Bot が接続しているボイスチャンネルと紐づくテキストのみ処理
     if message.channel.id != vc.channel.id:
         return
 
-    user_id = message.author.id
     # ユーザーの声線 ID を取得（未登録ならランダム付与）
-    speaker_id = get_voice_for_user(user_id, message.author.display_name)
+    speaker_id = get_voice_for_user(message.author.id, message.author.display_name)
 
     # 元メッセージの整形
     original_content = message.content.strip()
 
-    # カスタム絵文字を除去
-    custom_emoji_pattern = re.compile(r'<a?:(\w+):(\d+)>')
-    content = re.sub(custom_emoji_pattern, '', original_content)
+    # カスタム絵文字・既存絵文字を除去
+    content = CUSTOM_EMOJI_RE.sub('', original_content)
     content = emoji.replace_emoji(content, replace="")
 
     # "neko!" で始まるメッセージ（Music Bot 用）は無視
@@ -436,31 +519,31 @@ async def on_message(message: discord.Message):
     for role in message.role_mentions:
         content = content.replace(f"<@&{role.id}>", f"アットマーク {role.name}")
 
+    # 音声パス（必要に応じて決定）
+    wav_path: Optional[str] = None
+
     # 添付ファイルがある場合は専用音声を使用
     if message.attachments:
         wav_path = os.path.abspath(os.path.join(SAVED_WAV_DIR, 'attachment.wav'))
     else:
-        # URL の正規表現
-        url_pattern = re.compile(r'https?://[^\s]+')
-
         # メッセージが URL のみか判定
-        if re.fullmatch(url_pattern, original_content):
-            # 完全に URL のみなら事前用意の url.wav を使用
+        if re.fullmatch(URL_RE, original_content):
             wav_path = os.path.abspath(os.path.join(SAVED_WAV_DIR, 'url.wav'))
         else:
             # テキスト中の URL を固定語「URL」に置換
-            content = url_pattern.sub("URL", content)
+            content = URL_RE.sub("URL", content)
             # 長文は上限で切り詰め
             if len(content) > config_obj.max_text_length:
                 content = content[:config_obj.max_text_length] + "以下省略"
-            # 無視対象でなければ TTS 生成
-            if content.strip() and not checker.ignore_check(content):
-                wav_path = await generate_wav(content, speaker_id)
+            wav_path = await generate_wav(content, speaker_id)
 
     # 生成 or 指定された音声をキューへ投入
     if wav_path is not None and os.path.exists(wav_path):
         tts_manager.enqueue(vc, message.guild, build_audio_entry(wav_path))
 
+# -------------------------------
+# ボイス状態イベント
+# -------------------------------
 @client.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     guild = member.guild
