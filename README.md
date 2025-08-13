@@ -38,9 +38,4 @@ AivisSpeech は VOICEVOX エンジンをベースにした日本語音声合成�
 本プロジェクトは **[zozonteq さん](https://github.com/zozonteq/yomiage-bot/tree/main)** のコードをベースにしています。  
 素晴らしい基盤を提供してくださり、ありがとうございます！
 
----
-
-## 📄 ライセンス
-
-（必要に応じてライセンスを追記してください）
 
