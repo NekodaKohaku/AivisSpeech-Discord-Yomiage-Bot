@@ -345,31 +345,46 @@ async def generate_wav(text: str, speaker: int = 888753760, file_dir: str = TEMP
 # ===============================
 # 通知音声（入室・退室）の生成
 # ===============================
-_last_notice_name: Dict[tuple, str] = {}  # (guild_id, user_id, action) -> display_name
-
 async def generate_notification_wav(action: str, user, speaker: int = 888753760) -> Optional[str]:
     """
     入室/退室の通知音声を生成し、キャッシュしたファイルパスを返す。
       action: "join" または "leave"
     """
-    guild_id = user.guild.id
-    user_id = user.id
+    user_id = int(user.id)
     display_name = user.display_name
-    key = (guild_id, user_id, action)
 
-    filename = f"{action}_{guild_id}_{user_id}.wav"
+    # 出力ファイル名（サーバーIDとユーザーIDで一意化）
+    filename = f"{action}_{user.guild.id}_{user_id}.wav"
     filepath = os.path.join(SAVED_WAV_DIR, filename)
 
-    # 既存ファイルかつ表示名が変わっていなければ再利用
-    if os.path.exists(filepath) and _last_notice_name.get(key) == display_name:
+    # ユーザーの既存レコード取得（なければ初期形を用意）
+    rec = user_voice_mapping.get(user_id)
+    if rec is None:
+        rec = {"display_name": display_name, "voice_id": get_random_voice_id()}
+        user_voice_mapping[user_id] = rec
+        save_voice_mapping_debounced()
+
+    # 既存ファイルがあり、かつ voice_mapping.yaml の display_name と同じなら再利用
+    if os.path.exists(filepath) and rec.get("display_name") == display_name:
         return filepath
 
+    # display_name が変わっていれば更新
+    if rec.get("display_name") != display_name:
+        rec["display_name"] = display_name
+        save_voice_mapping_debounced()
+
+    # 合成テキストを作成
     text = f"{display_name} さんが{'入室' if action == 'join' else '退室'}しました。"
+
+    # TTS 生成
     temp_wav = await generate_wav(text, speaker)
     if temp_wav and os.path.exists(temp_wav):
-        shutil.move(temp_wav, filepath)
-        _last_notice_name[key] = display_name
+        try:
+            os.replace(temp_wav, filepath)
+        except Exception:
+            shutil.move(temp_wav, filepath)
         return filepath
+
     return None
 
 # ===============================
