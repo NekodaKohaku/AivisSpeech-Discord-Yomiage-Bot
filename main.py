@@ -18,16 +18,12 @@ from src import guild_tts_manager as tts_manager_module
 # ===============================
 # 基本ディレクトリとグローバル設定
 # ===============================
-SAVED_WAV_DIR = 'saved_wav'                 # 固定効果音・通知音などを置くフォルダ
-TEMP_WAV_DIR = os.path.join('temp', 'wav')  # TTS 一時生成先
+SAVED_WAV_DIR = 'saved_wav'
+TEMP_WAV_DIR = os.path.join('temp', 'wav')
 os.makedirs(SAVED_WAV_DIR, exist_ok=True)
 os.makedirs(TEMP_WAV_DIR, exist_ok=True)
-
-# TTS の各種タイムアウト（秒）
-PER_REQUEST_TIMEOUT = 10.0   # 各サーバーでの1件の生成上限
-FIRST_REPLY_TIMEOUT = 10.0   # 複数サーバー競争で最初の結果を待つ上限
-
-# よく使う正規表現は事前にコンパイル（毎回の compile コスト削減）
+PER_REQUEST_TIMEOUT = 10.0
+FIRST_REPLY_TIMEOUT = 10.0
 CUSTOM_EMOJI_RE = re.compile(r'<a?:(\w+):(\d+)>')
 URL_RE = re.compile(r'https?://[^\s]+')
 
@@ -38,18 +34,16 @@ available_voice_ids = [
     {"name": "Anneli", "id": 888753760}
 ]
 
-# 高頻度参照のため起動時に前計算
-VOICE_ID_SET = {v["id"] for v in available_voice_ids}                 # 有効ID集合
-VOICE_ID_NAME = {v["id"]: v["name"] for v in available_voice_ids}     # id -> 名前
+VOICE_ID_SET = {v["id"] for v in available_voice_ids}
+VOICE_ID_NAME = {v["id"]: v["name"] for v in available_voice_ids}
 
 # ===============================
-# ユーザー別の音声マッピング（YAML 永続化）
+# ユーザー別の音声マッピング
 # ===============================
 USER_VOICE_MAPPING_FILE = "voice_mapping.yaml"
 user_voice_mapping: Dict[int, dict] = {}
 
 def load_voice_mapping():
-    """YAML からユーザー音声マッピングを読み込む（なければ空）"""
     global user_voice_mapping
     if os.path.exists(USER_VOICE_MAPPING_FILE):
         with open(USER_VOICE_MAPPING_FILE, "r") as f:
@@ -57,12 +51,8 @@ def load_voice_mapping():
     else:
         user_voice_mapping = {}
 
-# 保存のデバウンス制御（短時間の連続更新で I/O を抑制）
 _save_pending = False
 def save_voice_mapping_debounced(delay: float = 0.8):
-    """
-    連続更新時のディスク I/O を抑えるため、保存を少し遅延させてまとめる。
-    """
     global _save_pending
     if _save_pending:
         return
@@ -77,30 +67,22 @@ def save_voice_mapping_debounced(delay: float = 0.8):
         finally:
             _save_pending = False
 
-    # ランタイム中のイベントループで遅延タスク実行
     try:
         asyncio.get_running_loop().create_task(_later())
     except RuntimeError:
-        # ループ未起動（起動直後など）の場合は即時保存にフォールバック
         with open(USER_VOICE_MAPPING_FILE, "w") as f:
             yaml.safe_dump(user_voice_mapping, f, allow_unicode=True)
 
 load_voice_mapping()
 
 def get_random_voice_id() -> int:
-    """利用可能な音声IDをランダム取得"""
     return random.choice(available_voice_ids)['id']
 
 def get_voice_for_user(user_id: int, display_name: str) -> int:
-    """
-    ユーザーの音声IDを取得。
-    未登録ならランダム割当てのうえ、YAML 保存（デバウンス）。
-    """
     if user_id in user_voice_mapping:
         user_data = user_voice_mapping[user_id]
         if isinstance(user_data, dict):
             return user_data.get('voice_id', 888753760)
-        # 旧形式（int）互換：dict に移行して保存
         user_voice_mapping[user_id] = {'voice_id': int(user_data), 'display_name': display_name}
         save_voice_mapping_debounced()
         return int(user_data)
@@ -113,9 +95,9 @@ def get_voice_for_user(user_id: int, display_name: str) -> int:
 # ===============================
 # Discord 用 WAV フォーマット検査
 # ===============================
-DISCORD_SR = 48000  # サンプリングレート
-DISCORD_CH = 2      # チャンネル数（ステレオ）
-DISCORD_SW = 2      # サンプル幅（バイト）= 16-bit
+DISCORD_SR = 48000
+DISCORD_CH = 2
+DISCORD_SW = 2
 
 def probe_wav(path: str):
     """WAV を開いて (sr, ch, sampwidth_bytes, nframes) を返す（非WAVは例外）"""
@@ -127,21 +109,88 @@ def is_discord_wav(sr: int, ch: int, sw: int) -> bool:
     return (sr == DISCORD_SR and ch == DISCORD_CH and sw == DISCORD_SW)
 
 # ===============================
-# PCM 直接再生用 AudioSource（FFmpeg 不使用）
+# PCM 直接再生用 AudioSource
 # ===============================
-# Discord への入力は 20ms 単位の PCM（48kHz / ステレオ / 16bit）を想定
-FRAME_SAMPLES = 960                     # 48kHz * 0.02s = 960
+FRAME_SAMPLES = 960
 CHANNELS = 2
 BYTES_PER_SAMPLE = 2
 FRAME_BYTES = FRAME_SAMPLES * CHANNELS * BYTES_PER_SAMPLE  # 960*2*2=3840 bytes
 
+class BytesWavPCMSource(discord.AudioSource):
+    def __init__(self, wav_bytes: bytes):
+        import io
+        self._bio = io.BytesIO(wav_bytes)
+        self._wav = wave.open(self._bio, 'rb')
+
+        sr = self._wav.getframerate()
+        ch = self._wav.getnchannels()
+        sw = self._wav.getsampwidth()
+
+        if sr != 48000:
+            raise ValueError("WAV must be 48kHz")
+        if sw != 2:
+            raise ValueError("WAV must be 16-bit (s16)")
+        if ch not in (1, 2):
+            raise ValueError("WAV must be mono or stereo (1ch/2ch)")
+
+        self._channels = ch
+        self._padded_last = False
+
+    def read(self) -> bytes:
+        if self._padded_last:
+            return b''
+
+        raw = self._wav.readframes(FRAME_SAMPLES)
+        if not raw:
+            return b''
+
+        if self._channels == 2:
+            frame_bytes = FRAME_BYTES
+            if len(raw) < frame_bytes:
+                raw += b'\x00' * (frame_bytes - len(raw))
+                self._padded_last = True
+            return raw
+
+        mono_frame_bytes = FRAME_SAMPLES * BYTES_PER_SAMPLE  # 1920
+        if len(raw) < mono_frame_bytes:
+            raw += b'\x00' * (mono_frame_bytes - len(raw))
+            self._padded_last = True
+
+        out = bytearray(FRAME_BYTES)
+        mv_in = memoryview(raw)
+        mv_out = memoryview(out)
+        for i in range(FRAME_SAMPLES):
+            s = mv_in[2*i:2*i+2]
+            mv_out[4*i:4*i+2] = s
+            mv_out[4*i+2:4*i+4] = s
+        return mv_out.tobytes()
+
+    def is_opus(self) -> bool:
+        return False
+
+    def cleanup(self):
+        try:
+            self._wav.close()
+        except:
+            pass
+        self._bio = None
+        self._wav = None
+
+def build_audio_entry_from_bytes(wav_bytes: bytes, volume: float = 1.0):
+    source = BytesWavPCMSource(wav_bytes)
+    source = discord.PCMVolumeTransformer(source, volume=volume)
+    return {
+        "audio": source,
+        "file_path": None,
+        "delete_after_play": False,
+        "debug_used": "PCM(mem-upmix)"
+    }
+
 class WavPCMSource(discord.AudioSource):
-    """48kHz / ステレオ / 16bit の WAV をそのまま供給する AudioSource"""
     def __init__(self, wav_path: str):
         self.path = wav_path
         self._wav = wave.open(wav_path, 'rb')
 
-        # 期待フォーマットの明示チェック（例外で安定動作）
         if self._wav.getframerate() != 48000:
             raise ValueError("WAV must be 48kHz")
         if self._wav.getsampwidth() != 2:
@@ -149,13 +198,9 @@ class WavPCMSource(discord.AudioSource):
         if self._wav.getnchannels() != 2:
             raise ValueError("WAV must be stereo (2ch)")
 
-        self._padded_last = False  # 終端の不完全フレームを一度だけ無音でパディングしたか
+        self._padded_last = False
 
     def read(self) -> bytes:
-        """
-        20ms（960フレーム）単位で PCM を返す。
-        終端が 20ms 未満なら不足分を無音で埋めて一度だけ返し、次回は空を返す。
-        """
         if self._padded_last:
             return b''
 
@@ -170,21 +215,15 @@ class WavPCMSource(discord.AudioSource):
         return data
 
     def is_opus(self) -> bool:
-        """PCM を返すため False"""
         return False
 
     def cleanup(self):
-        """再生終了時に呼ばれるクリーンアップ"""
         try:
             self._wav.close()
         except:
             pass
 
 def build_audio_entry(wav_path: str, saved_dir: str = SAVED_WAV_DIR, volume: float = 1.0):
-    """
-    再生キュー投入用のエントリ dict を作成。
-    ここで WavPCMSource の生成に失敗（フォーマット不一致等）した場合は例外。
-    """
     try:
         source = WavPCMSource(wav_path)
         source = discord.PCMVolumeTransformer(source, volume=volume)
@@ -207,10 +246,6 @@ def build_audio_entry(wav_path: str, saved_dir: str = SAVED_WAV_DIR, volume: flo
 _http_session: Optional[aiohttp.ClientSession] = None
 
 async def get_http_session() -> aiohttp.ClientSession:
-    """
-    共有の aiohttp.ClientSession を取得。
-    未生成または閉じている場合は再生成して返す。
-    """
     global _http_session
     if _http_session is None or _http_session.closed:
         _http_session = aiohttp.ClientSession(
@@ -228,25 +263,19 @@ async def get_http_session() -> aiohttp.ClientSession:
     return _http_session
 
 # ===============================
-# TTS 生成（FFmpeg 非依存）
-#  - キャッシュなし
-#  - in-flight 統合なし
-#  - 並列競争は as_completed（最初に成功したサーバーを採用）
+# TTS 生成
 # ===============================
-async def generate_wav_from_server(text: str, speaker: int, filepath: str, host: str, port: int) -> Optional[str]:
-    """
-    VOICEVOX 互換 API を利用して WAV を生成する。
-      1) /audio_query で合成パラメータを取得
-      2) /synthesis で 48kHz / ステレオ の WAV を受け取る
-    受信後はフォーマットを即検査し、想定外なら None を返す。
-    """
+def probe_wav_bytes(data: bytes):
+    import io
+    with contextlib.closing(wave.open(io.BytesIO(data), 'rb')) as w:
+        return w.getframerate(), w.getnchannels(), w.getsampwidth(), w.getnframes()
+
+async def generate_wav_bytes_from_server(text: str, speaker: int, host: str, port: int) -> Optional[bytes]:
     session = await get_http_session()
+    req_to = aiohttp.ClientTimeout(total=PER_REQUEST_TIMEOUT)
+    params = {'text': text, 'speaker': speaker, "enable_interrogative_upspeak": "true"}
 
-    async def _do_one():
-        params = {'text': text, 'speaker': speaker, "enable_interrogative_upspeak": "true"}
-        req_to = aiohttp.ClientTimeout(total=PER_REQUEST_TIMEOUT)
-
-        # Step 1: audio_query
+    try:
         async with session.post(
             f'http://{host}:{port}/audio_query',
             params=params,
@@ -255,11 +284,10 @@ async def generate_wav_from_server(text: str, speaker: int, filepath: str, host:
             resp_query.raise_for_status()
             query_data = await resp_query.json()
 
-        # Discord 互換出力を要求
         query_data["outputSamplingRate"] = 48000
-        query_data["outputStereo"] = True
-
-        # Step 2: synthesis
+        query_data["outputStereo"] = False
+        query_data["leading_silence_seconds"] = 0.0
+        
         headers = {'Content-Type': 'application/json'}
         async with session.post(
             f'http://{host}:{port}/synthesis',
@@ -271,11 +299,73 @@ async def generate_wav_from_server(text: str, speaker: int, filepath: str, host:
             resp_synth.raise_for_status()
             audio_data = await resp_synth.read()
 
-        # ファイル保存
+        sr, ch, sw, _ = probe_wav_bytes(audio_data)
+        if sr != 48000 or sw != 2 or ch not in (1, 2):
+            raise ValueError(f"不正なWAV形式: sr={sr}, ch={ch}, sw={sw*8}bit")
+        return audio_data
+
+    except Exception as e:
+        print(f"Error generating wav(bytes) from {host}:{port} - {e}")
+        return None
+
+async def generate_wav_bytes(text: str, speaker: int = 888753760) -> Optional[bytes]:
+    servers = [
+        {"host": "localhost", "port": 10101},
+        {"host": "192.168.0.246", "port": 10101},
+    ]
+    tasks = [asyncio.create_task(generate_wav_bytes_from_server(text, speaker, s["host"], s["port"])) for s in servers]
+
+    winner: Optional[bytes] = None
+    try:
+        for coro in asyncio.as_completed(tasks, timeout=FIRST_REPLY_TIMEOUT):
+            try:
+                result = await coro
+            except Exception:
+                continue
+            if result:
+                winner = result
+                break
+    except asyncio.TimeoutError:
+        winner = None
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+    return winner
+
+async def generate_wav_from_server(text: str, speaker: int, filepath: str, host: str, port: int) -> Optional[str]:
+    session = await get_http_session()
+
+    async def _do_one():
+        params = {'text': text, 'speaker': speaker, "enable_interrogative_upspeak": "true"}
+        req_to = aiohttp.ClientTimeout(total=PER_REQUEST_TIMEOUT)
+
+        async with session.post(
+            f'http://{host}:{port}/audio_query',
+            params=params,
+            timeout=req_to
+        ) as resp_query:
+            resp_query.raise_for_status()
+            query_data = await resp_query.json()
+
+        query_data["outputSamplingRate"] = 48000
+        query_data["outputStereo"] = True
+        query_data["leading_silence_seconds"] = 0.0
+
+        headers = {'Content-Type': 'application/json'}
+        async with session.post(
+            f'http://{host}:{port}/synthesis',
+            headers=headers,
+            params=params,
+            json=query_data,
+            timeout=req_to
+        ) as resp_synth:
+            resp_synth.raise_for_status()
+            audio_data = await resp_synth.read()
+
         with open(filepath, "wb") as f:
             f.write(audio_data)
 
-        # 即フォーマット検査
         sr, ch, sw, _ = probe_wav(filepath)
         if not is_discord_wav(sr, ch, sw):
             raise ValueError(f"不正なWAV形式: sr={sr}, ch={ch}, sw={sw*8}bit（48kHz/2ch/16bit が必須）")
@@ -285,7 +375,6 @@ async def generate_wav_from_server(text: str, speaker: int, filepath: str, host:
     try:
         return await asyncio.wait_for(_do_one(), timeout=PER_REQUEST_TIMEOUT)
     except Exception as e:
-        # 例外時は一時ファイルを削除して None
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
@@ -295,9 +384,6 @@ async def generate_wav_from_server(text: str, speaker: int, filepath: str, host:
         return None
 
 async def generate_wav(text: str, speaker: int = 888753760, file_dir: str = TEMP_WAV_DIR) -> Optional[str]:
-    """
-    複数 TTS サーバーに並列で投げ、最初に成功した結果を採用。
-    """
     os.makedirs(file_dir, exist_ok=True)
 
     servers = [
@@ -317,7 +403,6 @@ async def generate_wav(text: str, speaker: int = 888753760, file_dir: str = TEMP
     winner: Optional[str] = None
 
     try:
-        # 先着成功のタスクを採用
         for coro in asyncio.as_completed(tasks, timeout=FIRST_REPLY_TIMEOUT):
             try:
                 result = await coro
@@ -329,7 +414,6 @@ async def generate_wav(text: str, speaker: int = 888753760, file_dir: str = TEMP
     except asyncio.TimeoutError:
         winner = None
     finally:
-        # 勝者以外のタスクをキャンセル＆残骸削除
         for t in tasks:
             if not t.done():
                 t.cancel()
@@ -346,37 +430,27 @@ async def generate_wav(text: str, speaker: int = 888753760, file_dir: str = TEMP
 # 通知音声（入室・退室）の生成
 # ===============================
 async def generate_notification_wav(action: str, user, speaker: int = 888753760) -> Optional[str]:
-    """
-    入室/退室の通知音声を生成し、キャッシュしたファイルパスを返す。
-      action: "join" または "leave"
-    """
     user_id = int(user.id)
     display_name = user.display_name
 
-    # 出力ファイル名（サーバーIDとユーザーIDで一意化）
     filename = f"{action}_{user.guild.id}_{user_id}.wav"
     filepath = os.path.join(SAVED_WAV_DIR, filename)
 
-    # ユーザーの既存レコード取得（なければ初期形を用意）
     rec = user_voice_mapping.get(user_id)
     if rec is None:
         rec = {"display_name": display_name, "voice_id": get_random_voice_id()}
         user_voice_mapping[user_id] = rec
         save_voice_mapping_debounced()
 
-    # 既存ファイルがあり、かつ voice_mapping.yaml の display_name と同じなら再利用
     if os.path.exists(filepath) and rec.get("display_name") == display_name:
         return filepath
 
-    # display_name が変わっていれば更新
     if rec.get("display_name") != display_name:
         rec["display_name"] = display_name
         save_voice_mapping_debounced()
 
-    # 合成テキストを作成
     text = f"{display_name} さんが{'入室' if action == 'join' else '退室'}しました。"
 
-    # TTS 生成
     temp_wav = await generate_wav(text, speaker)
     if temp_wav and os.path.exists(temp_wav):
         try:
@@ -422,8 +496,10 @@ tree = app_commands.CommandTree(client)
 _restart_locks: Dict[int, asyncio.Lock] = {}
 _backoff_state: Dict[int, int] = {}  # guild.id -> backoff step
 
+def guild_lock(guild_id: int) -> asyncio.Lock:
+    return _restart_locks.setdefault(guild_id, asyncio.Lock())
+
 async def restart_voice(guild: discord.Guild):
-    """音声接続を強制的に再確立（幽霊状態も考慮）"""
     vc = guild.voice_client
     lock = _restart_locks.setdefault(guild.id, asyncio.Lock())
     async with lock:
@@ -460,7 +536,6 @@ async def restart_voice(guild: discord.Guild):
             asyncio.create_task(_cooldown())
 
 async def force_drop_voice(guild: discord.Guild):
-    """幽霊状態の強制解除（server 側の voice state をリセット）"""
     try:
         await guild.change_voice_state(channel=None, self_mute=False, self_deaf=False)
         print(f"[VOICE] force_drop_voice done guild={guild.id}")
@@ -468,10 +543,9 @@ async def force_drop_voice(guild: discord.Guild):
         print(f"[VOICE] force_drop_voice error guild={guild.id}: {e}")
 
 async def safe_connect(channel: discord.VoiceChannel, timeout: float = 8.0, retries: int = 2):
-    """安全な connect：タイムアウト監視＋リトライ（幽霊対策）"""
     for i in range(retries + 1):
         try:
-            return await asyncio.wait_for(channel.connect(), timeout=timeout)
+            return await asyncio.wait_for(channel.connect(reconnect=True), timeout=timeout)
         except asyncio.TimeoutError:
             print(f"[VOICE] connect timeout ch={channel.id} try={i+1}")
             await force_drop_voice(channel.guild)
@@ -506,7 +580,8 @@ async def vrestart_command(interaction: discord.Interaction):
             target_ch = user_ch if user_ch else me_vs.channel
             await force_drop_voice(guild)
             await asyncio.sleep(0.5)
-            await safe_connect(target_ch)
+            async with guild_lock(guild.id):
+                await safe_connect(target_ch)
 
             await interaction.channel.send(f"**{actor}**さんが音声接続を再起動しました。")
 
@@ -527,7 +602,8 @@ async def vrestart_command(interaction: discord.Interaction):
         # 2) 既に VoiceClient がある（幽霊ではない）
         if vc and vc.is_connected():
             if user_ch and vc.channel != user_ch:
-                await safe_connect(user_ch)     # move は内部的に再接続扱い
+                async with guild_lock(guild.id):
+                    await safe_connect(user_ch)
             else:
                 await restart_voice(guild)
 
@@ -574,7 +650,6 @@ async def join_command(interaction: discord.Interaction):
     if interaction.user.voice is None:
         await interaction.response.send_message("先にボイスチャンネルへ参加してください。", ephemeral=True)
         return
-
     await interaction.response.defer(ephemeral=True)
 
     guild = interaction.guild
@@ -582,13 +657,14 @@ async def join_command(interaction: discord.Interaction):
     vc = guild.voice_client
 
     try:
-        if vc and vc.is_connected():
-            if vc.channel.id != target_ch.id:
+        async with guild_lock(guild.id):
+            if vc and vc.is_connected():
+                if vc.channel.id != target_ch.id:
+                    await safe_connect(target_ch)
+            else:
+                await force_drop_voice(guild)
+                await asyncio.sleep(0.5)
                 await safe_connect(target_ch)
-        else:
-            await force_drop_voice(guild)
-            await asyncio.sleep(0.5)
-            await safe_connect(target_ch)
 
         await interaction.followup.send("ボイスチャンネルに接続しました。", ephemeral=True)
         wav_path = os.path.abspath(os.path.join(SAVED_WAV_DIR, 'bot_join.wav'))
@@ -613,14 +689,18 @@ async def leave_command(interaction: discord.Interaction):
             await interaction.followup.send("ボットのいるチャンネルでコマンドを実行してください。", ephemeral=True)
             return
 
-        if vc and vc.is_connected():
-            await vc.disconnect()
-            await interaction.followup.send("切断しました。", ephemeral=True)
-        elif me_vs and me_vs.channel is not None:
-            await force_drop_voice(guild)
-            await interaction.followup.send("接続が不整合のため、強制的に切断要求を送りました。", ephemeral=True)
-        else:
-            await interaction.followup.send("ボットはボイスチャンネルに接続していません。", ephemeral=True)
+        async with guild_lock(guild.id):
+            if vc and vc.is_connected():
+                try:
+                    await vc.disconnect()
+                except Exception:
+                    await vc.disconnect(force=True)
+                await interaction.followup.send("切断しました。", ephemeral=True)
+            elif me_vs and me_vs.channel is not None:
+                await force_drop_voice(guild)
+                await interaction.followup.send("接続が不整合のため、強制的に切断要求を送りました。", ephemeral=True)
+            else:
+                await interaction.followup.send("ボットはボイスチャンネルに接続していません。", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"切断に失敗しました: {e}", ephemeral=True)
 
@@ -712,11 +792,11 @@ async def on_message(message: discord.Message):
         content = content[:config_obj.max_text_length] + "以下省略"
 
     # 10) TTS 生成（毎回新規に合成。キャッシュ・in-flight なし）
-    wav_path: Optional[str] = await generate_wav(content, speaker_id)
+    wav_bytes: Optional[bytes] = await generate_wav_bytes(content, speaker_id)
 
     # 11) 成功したら再生キューへ投入（TEMP 生成物は再生後に自動削除）
-    if wav_path and os.path.exists(wav_path):
-        tts_manager.enqueue(vc, message.guild, build_audio_entry(wav_path))
+    if wav_bytes:
+        tts_manager.enqueue(vc, message.guild, build_audio_entry_from_bytes(wav_bytes))
 
 # ===============================
 # ボイス状態イベント
@@ -725,73 +805,78 @@ async def on_message(message: discord.Message):
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     guild = member.guild
     vc = guild.voice_client
+    me_vs = getattr(guild.me, "voice", None)
 
-    # 同一ギルド内のチャンネル移動
+    ghost = (vc is None and me_vs and me_vs.channel is not None)
+    if ghost:
+        await restart_voice(guild)
+        return
+
     if before.channel is not None and after.channel is not None and before.channel != after.channel:
         if vc is not None:
-            # 他チャンネル → Bot のチャンネルへ移動：入室通知
             if after.channel == vc.channel:
                 if not member.bot:
                     wav_path = await generate_notification_wav("join", member, speaker=888753760)
                     if wav_path:
                         tts_manager.enqueue(vc, guild, build_audio_entry(wav_path))
-            # Bot のチャンネル → 他チャンネル：退室通知
             elif before.channel == vc.channel:
                 if not member.bot:
                     wav_path = await generate_notification_wav("leave", member, speaker=888753760)
                     if wav_path:
                         tts_manager.enqueue(vc, guild, build_audio_entry(wav_path))
         else:
-            # 未接続：移動先へ接続して起動音を再生
-            await after.channel.connect()
+            async with guild_lock(guild.id):
+                await safe_connect(after.channel)
             vc = guild.voice_client
             bot_join_path = os.path.abspath(os.path.join(SAVED_WAV_DIR, 'bot_join.wav'))
             tts_manager.enqueue(vc, guild, build_audio_entry(bot_join_path))
 
-    # 新規参加（before 無し → after あり）
     if before.channel is None and after.channel is not None:
         if guild.voice_client is not None:
             if after.channel != guild.voice_client.channel:
                 return
         else:
-            # 未接続：参加先へ接続して起動音を再生
-            await after.channel.connect()
+            async with guild_lock(guild.id):
+                await safe_connect(after.channel)
             vc = guild.voice_client
             bot_join_path = os.path.abspath(os.path.join(SAVED_WAV_DIR, 'bot_join.wav'))
             tts_manager.enqueue(vc, guild, build_audio_entry(bot_join_path))
             return
 
-        # Bot 以外のユーザーは入室通知を再生
         if not member.bot:
             wav_path = await generate_notification_wav("join", member, speaker=888753760)
             if wav_path:
-                # 第二引数に guild を渡す（queue キー不一致の回避）
                 tts_manager.enqueue(guild.voice_client, guild, build_audio_entry(wav_path))
 
-    # 退出（before あり → after 無し）
     if before.channel is not None and after.channel is None:
+        vc = guild.voice_client
         if vc is None or member.bot:
             return
         if before.channel != vc.channel:
             return
 
-        # 非Bot メンバーが残っていなければ切断
         non_bot_members = [m for m in before.channel.members if not m.bot]
         if not non_bot_members:
-            await vc.disconnect()
+            async with guild_lock(guild.id):
+                try:
+                    await vc.disconnect()
+                except Exception:
+                    await vc.disconnect(force=True)
             return
 
-        # 残っている場合は退室通知を再生
         wav_path = await generate_notification_wav("leave", member, speaker=888753760)
         if wav_path:
             tts_manager.enqueue(vc, guild, build_audio_entry(wav_path))
 
-    # 最終チェック：Bot のいるチャンネルに非Bot がいなければ切断
     vc = guild.voice_client
     if vc is not None:
         non_bot_members = [m for m in vc.channel.members if not m.bot]
         if not non_bot_members:
-            await vc.disconnect()
+            async with guild_lock(guild.id):
+                try:
+                    await vc.disconnect()
+                except Exception:
+                    await vc.disconnect(force=True)
 
 # ===============================
 # クライアント起動
