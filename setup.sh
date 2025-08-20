@@ -14,9 +14,6 @@ if [ ! -e ./configs/config.yml ] ; then
   echo    'access_token: DISCORD_ACCESS_TOKEN
 application_id: DISCORD_CLIENT_ID
 
-voicevox_host: "localhost"
-voicevox_port: 50021
-
 max_text_length: 40
 ' >> ./configs/config.yml
 fi
